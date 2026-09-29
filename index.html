@@ -198,6 +198,21 @@
   #onlineStatus.error { color: #ff6b5b; }
   #onlineStatus.ok { color: #2ecc71; }
 
+  /* Спиннер загрузки */
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #ffd54f;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
   /* ===== АРЕНА ===== */
   #scene {
     position: relative; flex: 1;
@@ -1169,7 +1184,6 @@
     <div id="onlineBox">
       <h2 id="onlineTitle">ОНЛАЙН ИГРА</h2>
 
-      <!-- Выбор: создать или войти -->
       <div id="onlineChoose">
         <p>Создай комнату и отправь другу <b>код</b> или <b>ссылку</b>.<br>
         Либо введи код друга чтобы присоединиться.</p>
@@ -1182,22 +1196,20 @@
         </div>
       </div>
 
-      <!-- Хост: показ кода -->
       <div id="onlineHosting" style="display:none;">
         <p>Отправь другу этот код или ссылку:</p>
         <div id="myCodeDisplay">------</div>
         <div id="shareLinkBox" title="Нажми чтобы скопировать">—</div>
-        <p style="font-size:12px;opacity:0.7;margin-top:8px;">⏳ Ожидание подключения соперника...</p>
+        <p style="font-size:12px;opacity:0.7;margin-top:8px;"><span class="spinner"></span>Ожидание подключения...</p>
         <div class="row">
-          <button class="menu-btn" id="btnCopyLink" style="padding:10px;font-size:13px;background:linear-gradient(180deg,#9b59b6,#6c3483);box-shadow:0 6px 0 #4a1d5e;">📋 СКОПИРОВАТЬ</button>
+          <button class="menu-btn purple" id="btnCopyLink" style="padding:10px;font-size:13px;">📋 СКОПИРОВАТЬ</button>
           <button class="menu-btn" id="btnCancelHost" style="padding:10px;font-size:13px;">ОТМЕНА</button>
         </div>
       </div>
 
-      <!-- Клиент: ввод кода -->
       <div id="onlineJoining" style="display:none;">
         <p>Введи код комнаты друга:</p>
-        <input type="text" id="roomCodeInput" placeholder="ABC123" maxlength="8" autocomplete="off" autocapitalize="characters">
+        <input type="text" id="roomCodeInput" placeholder="ABC123" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false">
         <div class="row">
           <button class="menu-btn green" id="btnConfirmJoin">ВОЙТИ</button>
           <button class="menu-btn" id="btnCancelJoin" style="padding:10px;font-size:14px;">ОТМЕНА</button>
@@ -1381,16 +1393,37 @@ const game = {
 const WIN_SCORE = 30;
 
 /* ============================================================
+   АВТООПРЕДЕЛЕНИЕ: код из URL
+   Поддерживаем: #room=CODE, ?room=CODE, #CODE, ?code=CODE
+   ============================================================ */
+function parseRoomFromUrl() {
+  try {
+    // Проверяем hash: #room=CODE или #CODE
+    const hash = (window.location.hash || '').replace(/^#/, '');
+    if (hash) {
+      const m1 = hash.match(/^room[=:]([A-Z0-9]{4,8})$/i);
+      if (m1) return m1[1].toUpperCase();
+      const m2 = hash.match(/^([A-Z0-9]{4,8})$/i);
+      if (m2) return m2[1].toUpperCase();
+    }
+    // Проверяем query: ?room=CODE или ?code=CODE
+    const search = (window.location.search || '');
+    const m3 = search.match(/[?&](?:room|code)=([A-Z0-9]{4,8})/i);
+    if (m3) return m3[1].toUpperCase();
+  } catch(e) {}
+  return null;
+}
+
+/* ============================================================
    СЕТЬ (PeerJS)
-   PeerJS сам подбирает рабочий сервер. Используем ID с префиксом.
    ============================================================ */
 let peer = null;
 let conn = null;
 let myRoomCode = '';
 let connectionTimeoutHandle = null;
+let isConnecting = false;
 
 function generateRoomCode() {
-  // Без похожих символов (0/O, 1/I/l)
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
@@ -1398,58 +1431,38 @@ function generateRoomCode() {
 }
 
 function peerIdFromCode(code) {
-  // Единый префикс, чтобы не конфликтовать с другими peerjs приложениями
-  return 'slap-arena-v2-' + code.toUpperCase();
+  return 'slap-arena-v3-' + code.toUpperCase();
 }
 
-/* Инициализация Peer */
-function initPeer(customCode, onReady, onError) {
-  // Уничтожаем старого
+/* Хост: создаём peer с фиксированным ID */
+function createHostPeer(code, onReady, onError) {
   if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
   conn = null;
+  isConnecting = false;
 
-  const id = customCode ? peerIdFromCode(customCode) : null;
+  const targetId = peerIdFromCode(code);
 
-  peer = new Peer(id, {
-    debug: 1,
+  peer = new Peer(targetId, {
+    debug: 2,
     config: {
-      'iceServers': [
+      iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
         { urls: 'stun:global.stun.twilio.com:3478' }
       ]
     }
   });
 
-  peer.on('open', (openedId) => {
-    console.log('Peer открыт с ID:', openedId);
-    if (onReady) onReady(openedId);
+  peer.on('open', (id) => {
+    console.log('[HOST] Peer открыт с ID:', id);
+    if (onReady) onReady(id);
   });
 
-  peer.on('error', (err) => {
-    console.error('Peer error:', err);
-    let msg = 'Ошибка подключения';
-    if (err.type === 'unavailable-id') {
-      msg = 'Такой код уже используется. Попробуй ещё раз.';
-    } else if (err.type === 'peer-unavailable') {
-      msg = 'Комната не найдена. Проверь код.';
-    } else if (err.type === 'network') {
-      msg = 'Проблема с сетью. Проверь интернет.';
-    } else if (err.type === 'server-error') {
-      msg = 'Сервер PeerJS недоступен. Попробуй позже.';
-    } else if (err.type === 'browser-incompatible') {
-      msg = 'Браузер не поддерживает WebRTC.';
-    } else if (err.message) {
-      msg = err.message;
-    }
-    if (onError) onError(msg, err);
-  });
-
-  // Хост — принимает входящие
   peer.on('connection', (incoming) => {
-    console.log('Входящее подключение от:', incoming.peer);
+    console.log('[HOST] Входящее подключение от:', incoming.peer);
     if (conn && conn.open) {
-      console.log('Уже есть соединение — отклоняем');
+      console.log('[HOST] Уже есть соединение — закрываем новое');
       try { incoming.close(); } catch(e){}
       return;
     }
@@ -1457,14 +1470,78 @@ function initPeer(customCode, onReady, onError) {
     bindConnection();
   });
 
-  // Иногда peer.disconnected — попробуем переподключиться
+  peer.on('error', (err) => {
+    console.error('[HOST] Peer error:', err);
+    let msg = 'Ошибка: ' + (err.type || err.message || 'неизвестно');
+    if (err.type === 'unavailable-id') msg = 'Код занят, попробуй снова';
+    if (onError) onError(msg, err);
+  });
+
   peer.on('disconnected', () => {
-    console.log('Peer отключён, пытаюсь reconnect...');
+    console.log('[HOST] Peer disconnected, переподключение...');
     try { peer.reconnect(); } catch(e){}
   });
 }
 
-/* Привязка обработчиков к соединению */
+/* Клиент: создаём анонимный peer и подключаемся к хосту */
+function createClientPeer(targetCode, onError) {
+  if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
+  conn = null;
+  isConnecting = false;
+
+  peer = new Peer({
+    debug: 2,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478' }
+      ]
+    }
+  });
+
+  peer.on('open', (myId) => {
+    console.log('[CLIENT] Мой ID:', myId, '→ подключаюсь к', peerIdFromCode(targetCode));
+    isConnecting = true;
+
+    const c = peer.connect(peerIdFromCode(targetCode), {
+      reliable: true,
+      metadata: { v: 3 }
+    });
+    conn = c;
+    bindConnection();
+
+    // Таймаут
+    connectionTimeoutHandle = setTimeout(() => {
+      if (!conn || !conn.open) {
+        setOnlineStatus('Не удалось подключиться. Убедись что хост ждёт и код верный.', 'error');
+        isConnecting = false;
+      }
+    }, 20000);
+  });
+
+  peer.on('error', (err) => {
+    console.error('[CLIENT] Peer error:', err);
+    let msg = 'Ошибка: ' + (err.type || err.message || 'неизвестно');
+    if (err.type === 'peer-unavailable') {
+      msg = 'Комната не найдена. Проверь код — возможно хост закрыл вкладку.';
+    } else if (err.type === 'network') {
+      msg = 'Проблема с сетью. Проверь интернет.';
+    } else if (err.type === 'server-error') {
+      msg = 'Сервер PeerJS недоступен. Попробуй позже.';
+    } else if (err.type === 'browser-incompatible') {
+      msg = 'Браузер не поддерживает WebRTC.';
+    }
+    if (onError) onError(msg, err);
+  });
+
+  peer.on('disconnected', () => {
+    console.log('[CLIENT] Peer disconnected, переподключение...');
+    try { peer.reconnect(); } catch(e){}
+  });
+}
+
 function bindConnection() {
   if (!conn) return;
 
@@ -1475,11 +1552,12 @@ function bindConnection() {
 
   conn.on('open', () => {
     console.log('✓ Соединение установлено!');
-    setOnlineStatus('✓ Соединение установлено! Начинаем...', 'ok');
+    isConnecting = false;
+    setOnlineStatus('✓ Соединение установлено!', 'ok');
     setTimeout(() => {
       closeOnlineModal();
       startOnlineGame();
-    }, 500);
+    }, 400);
   });
 
   conn.on('data', (data) => {
@@ -1489,6 +1567,7 @@ function bindConnection() {
 
   conn.on('close', () => {
     console.log('Соединение закрыто');
+    isConnecting = false;
     if (game.running && !game.roundOver && game.mode === 'online') {
       overTitle.textContent = '⚠️ СОПЕРНИК ОТКЛЮЧИЛСЯ';
       overText.textContent = 'Соединение потеряно.';
@@ -1503,14 +1582,12 @@ function bindConnection() {
   });
 }
 
-/* Отправка данных */
 function sendNetwork(data) {
   if (conn && conn.open) {
     try { conn.send(data); } catch(e) { console.error('Ошибка отправки:', e); }
   }
 }
 
-/* Приём данных */
 function handleNetworkData(data) {
   if (!data || !data.type) return;
   switch (data.type) {
@@ -1518,34 +1595,13 @@ function handleNetworkData(data) {
       receiveOpponentHit(data.power, data.points, data.zoneName);
       break;
     case 'restart':
-      // Соперник нажал "Играть снова" — сбрасываем
       doResetGame();
-      break;
-    case 'hello':
-      console.log('Получен hello от соперника');
-      break;
-    case 'ready':
-      // Клиент готов, хост делает первый ход
       break;
   }
 }
 
 /* ============================================================
-   ССЫЛКА / URL
-   ============================================================ */
-function buildShareLink(code) {
-  const base = window.location.origin + window.location.pathname;
-  return base + '#room=' + code;
-}
-
-function parseRoomFromUrl() {
-  const hash = window.location.hash || '';
-  const m = hash.match(/room=([A-Z0-9]+)/i);
-  return m ? m[1].toUpperCase() : null;
-}
-
-/* ============================================================
-   UI МЕНЮ И МОДАЛКА
+   UI МЕНЮ
    ============================================================ */
 const mainMenu = document.getElementById('mainMenu');
 const onlineModal = document.getElementById('onlineModal');
@@ -1558,7 +1614,7 @@ const shareLinkBox = document.getElementById('shareLinkBox');
 const roomCodeInput = document.getElementById('roomCodeInput');
 
 function setOnlineStatus(text, kind) {
-  onlineStatus.textContent = text || '';
+  onlineStatus.innerHTML = text || '';
   onlineStatus.className = kind || '';
 }
 
@@ -1584,7 +1640,7 @@ function showOnlineJoining(prefill) {
   onlineJoining.style.display = 'block';
   roomCodeInput.value = prefill || '';
   setOnlineStatus('');
-  setTimeout(() => roomCodeInput.focus(), 100);
+  setTimeout(() => roomCodeInput.focus(), 150);
 }
 function openOnlineModal() {
   onlineModal.classList.add('show');
@@ -1595,14 +1651,18 @@ function closeOnlineModal() {
   setOnlineStatus('');
 }
 
+function buildShareLink(code) {
+  const loc = window.location;
+  return loc.origin + loc.pathname + '#room=' + code;
+}
+
 document.getElementById('btnVsBot').addEventListener('click', () => {
   ensureAudio();
   game.mode = 'bot';
   game.isHost = false;
   mainMenu.style.display = 'none';
-  // Убираем хэш из URL если был
-  if (window.location.hash) {
-    history.replaceState(null, '', window.location.pathname);
+  if (window.location.hash || window.location.search) {
+    try { history.replaceState(null, '', window.location.pathname); } catch(e){}
   }
   doResetGame();
 });
@@ -1616,26 +1676,22 @@ document.getElementById('btnCloseOnline').addEventListener('click', () => {
   closeOnlineModal();
 });
 
-/* СОЗДАТЬ КОМНАТУ */
+/* СОЗДАТЬ */
 document.getElementById('btnCreateRoom').addEventListener('click', () => {
   ensureAudio();
-  setOnlineStatus('Создание комнаты...');
+  setOnlineStatus('<span class="spinner"></span>Создание комнаты...');
+  game.isHost = true;
 
   const tryCreate = (attempt) => {
     const code = generateRoomCode();
     myRoomCode = code;
-    game.isHost = true;
-
-    initPeer(code, (openedId) => {
-      console.log('Комната создана, код:', code);
+    createHostPeer(code, (openedId) => {
+      console.log('Комната создана:', code);
       showOnlineHosting(code);
-      // Обновляем URL чтобы можно было переслать
-      history.replaceState(null, '', '#room=' + code);
+      try { history.replaceState(null, '', '#room=' + code); } catch(e){}
     }, (msg, err) => {
-      // Если код занят — пробуем другой
       if (err && err.type === 'unavailable-id' && attempt < 3) {
-        console.log('Код занят, пробуем другой...');
-        setTimeout(() => tryCreate(attempt + 1), 200);
+        setTimeout(() => tryCreate(attempt + 1), 300);
         return;
       }
       setOnlineStatus('Ошибка: ' + msg, 'error');
@@ -1647,43 +1703,45 @@ document.getElementById('btnCreateRoom').addEventListener('click', () => {
 document.getElementById('btnCancelHost').addEventListener('click', () => {
   if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
   conn = null;
+  isConnecting = false;
   if (connectionTimeoutHandle) { clearTimeout(connectionTimeoutHandle); connectionTimeoutHandle = null; }
-  history.replaceState(null, '', window.location.pathname);
+  try { history.replaceState(null, '', window.location.pathname); } catch(e){}
   showOnlineChoose();
 });
 
-/* Копировать ссылку */
+/* Копировать */
 document.getElementById('btnCopyLink').addEventListener('click', () => {
   const link = shareLinkBox.dataset.link || shareLinkBox.textContent;
   if (!link) return;
   const done = () => setOnlineStatus('✓ Ссылка скопирована!', 'ok');
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(link).then(done).catch(() => {
-      // fallback
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = link; document.body.appendChild(ta);
-        ta.select(); document.execCommand('copy');
-        document.body.removeChild(ta);
-        done();
-      } catch(e) { setOnlineStatus('Не удалось скопировать', 'error'); }
+      fallbackCopy(link, done);
     });
   } else {
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = link; document.body.appendChild(ta);
-      ta.select(); document.execCommand('copy');
-      document.body.removeChild(ta);
-      done();
-    } catch(e) { setOnlineStatus('Не удалось скопировать', 'error'); }
+    fallbackCopy(link, done);
   }
 });
-
+function fallbackCopy(text, done) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    done();
+  } catch(e) {
+    setOnlineStatus('Не удалось скопировать', 'error');
+  }
+}
 shareLinkBox.addEventListener('click', () => {
   document.getElementById('btnCopyLink').click();
 });
 
-/* ВОЙТИ В КОМНАТУ */
+/* ВОЙТИ */
 document.getElementById('btnJoinRoom').addEventListener('click', () => {
   ensureAudio();
   showOnlineJoining();
@@ -1699,23 +1757,9 @@ document.getElementById('btnConfirmJoin').addEventListener('click', () => {
     setOnlineStatus('Введи корректный код (мин. 4 символа)', 'error');
     return;
   }
-  setOnlineStatus('Подключение к ' + code + '...');
+  setOnlineStatus('<span class="spinner"></span>Подключение к ' + code + '...');
   game.isHost = false;
-
-  initPeer(null, (myId) => {
-    console.log('Мой ID:', myId, '→ подключаюсь к slap-arena-v2-' + code);
-    const targetId = peerIdFromCode(code);
-    const c = peer.connect(targetId, { reliable: true, metadata: { v: 2 } });
-    conn = c;
-    bindConnection();
-
-    // Таймаут на подключение 15 секунд
-    connectionTimeoutHandle = setTimeout(() => {
-      if (!conn || !conn.open) {
-        setOnlineStatus('Не удалось подключиться. Проверь код и что хост ещё ждёт.', 'error');
-      }
-    }, 15000);
-  }, (msg) => {
+  createClientPeer(code, (msg) => {
     setOnlineStatus('Ошибка: ' + msg, 'error');
   });
 });
@@ -1725,22 +1769,32 @@ roomCodeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') document.getElementById('btnCancelJoin').click();
 });
 
-/* Автозаполнение из URL (#room=XXX) */
-(function checkUrlOnLoad() {
-  const codeFromUrl = parseRoomFromUrl();
-  if (codeFromUrl) {
-    console.log('Обнаружен код в URL:', codeFromUrl);
-    // Открываем меню online и сразу форму входа
-    setTimeout(() => {
-      mainMenu.style.display = 'flex';
-      openOnlineModal();
-      showOnlineJoining(codeFromUrl);
-      setOnlineStatus('Код из ссылки: ' + codeFromUrl + '. Нажми ВОЙТИ.', 'ok');
-    }, 100);
-  }
-})();
+/* ============================================================
+   АВТОПОДКЛЮЧЕНИЕ ПО ССЫЛКЕ
+   ============================================================ */
+function autoJoinFromUrl() {
+  const code = parseRoomFromUrl();
+  if (!code) return false;
+  console.log('[AUTO] Обнаружен код в URL:', code);
+  // Открываем меню и форму входа
+  mainMenu.style.display = 'flex';
+  openOnlineModal();
+  showOnlineJoining(code);
+  setOnlineStatus('Код из ссылки: ' + code + '<br>Нажми <b>ВОЙТИ</b> чтобы подключиться', 'ok');
+  return true;
+}
 
-/* Меню выход */
+// Проверяем URL сразу и при изменении hash (например, если открыли ссылку в той же вкладке)
+window.addEventListener('hashchange', () => {
+  if (game.mode !== 'online') {
+    const code = parseRoomFromUrl();
+    if (code && !onlineModal.classList.contains('show')) {
+      autoJoinFromUrl();
+    }
+  }
+});
+
+/* МЕНЮ выход */
 document.getElementById('menuBtnSmall').addEventListener('click', () => {
   if (game.mode === 'online' && conn && conn.open) {
     if (!confirm('Выйти в меню? Соединение с соперником разорвётся.')) return;
@@ -1760,11 +1814,10 @@ function returnToMenu() {
   mainMenu.style.display = 'flex';
   if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
   conn = null;
+  isConnecting = false;
   if (connectionTimeoutHandle) { clearTimeout(connectionTimeoutHandle); connectionTimeoutHandle = null; }
   closeOnlineModal();
-  if (window.location.hash) {
-    history.replaceState(null, '', window.location.pathname);
-  }
+  try { history.replaceState(null, '', window.location.pathname); } catch(e){}
 }
 
 /* ============================================================
@@ -1795,7 +1848,6 @@ function playSlapSound(power) {
   ng.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
   noise.connect(nf).connect(ng).connect(audioCtx.destination);
   noise.start(t); noise.stop(t + 0.18);
-
   if (power > 0.5) {
     const osc = audioCtx.createOscillator();
     const g = audioCtx.createGain();
@@ -2141,7 +2193,7 @@ function animateEnemyArm(onImpact) {
 }
 
 /* ============================================================
-   УРОН СОПЕРНИКУ
+   УРОН
    ============================================================ */
 function applyDamageToOpponent(power, hitSide) {
   const d = game.opponentDamage;
@@ -2249,7 +2301,7 @@ function applyDamageToMe(power) {
 }
 
 /* ============================================================
-   ИГРОВОЙ ПРОЦЕСС
+   ИГРА
    ============================================================ */
 function playerHit() {
   if (!game.canHit || game.turn !== 'player') return;
@@ -2381,7 +2433,6 @@ function startTurn() {
         if (game.turn === 'enemy' && !game.roundOver) botTurn();
       }, 900 + Math.random() * 700);
     }
-    // В онлайне ход врага придёт по сети
   }
 }
 
@@ -2496,6 +2547,35 @@ document.addEventListener('click', function unlockAudio() {
   ensureAudio();
   document.removeEventListener('click', unlockAudio);
 }, { once: true });
+
+/* ============================================================
+   СТАРТ: проверяем URL на код и автоподключаемся
+   ============================================================ */
+window.addEventListener('load', () => {
+  // Небольшая задержка чтобы DOM был точно готов
+  setTimeout(() => {
+    const code = parseRoomFromUrl();
+    if (code) {
+      console.log('[START] Найден код в URL:', code);
+      autoJoinFromUrl();
+    }
+  }, 200);
+});
+
+// Проверка сразу (на случай если load уже прошёл)
+if (document.readyState === 'complete') {
+  setTimeout(() => {
+    const code = parseRoomFromUrl();
+    if (code) autoJoinFromUrl();
+  }, 200);
+} else {
+  setTimeout(() => {
+    const code = parseRoomFromUrl();
+    if (code && !onlineModal.classList.contains('show')) {
+      autoJoinFromUrl();
+    }
+  }, 600);
+}
 </script>
 </body>
 </html>
